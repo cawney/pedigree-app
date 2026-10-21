@@ -3,11 +3,12 @@
 
 import { useSyncExternalStore } from "react";
 
-export type Route = { name: "library" } | { name: "read"; id: string };
+export type Route = { name: "library" } | { name: "read"; id: string; page?: number };
 
 export function parseRoute(hash: string): Route {
-  const m = /^#\/read\/([^/?]+)/.exec(hash);
-  return m ? { name: "read", id: decodeURIComponent(m[1]) } : { name: "library" };
+  const m = /^#\/read\/([^/?]+)(?:\?page=(\d+))?/.exec(hash);
+  if (!m) return { name: "library" };
+  return { name: "read", id: decodeURIComponent(m[1]), page: m[2] ? Number(m[2]) : undefined };
 }
 
 const listeners = new Set<() => void>();
@@ -24,8 +25,9 @@ export function useRoute(): Route {
   return parseRoute(hash);
 }
 
-export function openCatalog(id: string) {
-  history.pushState({ fromLibrary: true }, "", `#/read/${encodeURIComponent(id)}`);
+/** Open a catalog, at a specific page if given (otherwise where the user left off). */
+export function openCatalog(id: string, page?: number) {
+  history.pushState({ fromLibrary: true }, "", `#/read/${encodeURIComponent(id)}${page ? `?page=${page}` : ""}`);
   listeners.forEach((fn) => fn());
 }
 

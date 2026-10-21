@@ -2,6 +2,8 @@
 // `LocalStore` boundary: optional account sync will hook in at this layer.
 
 import { getDb, type LibraryItem } from "./db";
+import { deleteAllForItem } from "../markup/store";
+import { deleteEntriesForItem } from "../shortlist/store";
 import { pdfFiles } from "./files";
 
 export type { LibraryItem };
@@ -42,9 +44,11 @@ export async function updateItem(id: string, patch: Partial<LibraryItem>): Promi
   changed();
 }
 
-/** Remove a catalog and its PDF from this device. */
+/** Remove a catalog, its PDF, markup and short list entries from this device. */
 export async function removeItem(id: string): Promise<void> {
   await pdfFiles.remove(id);
+  await deleteAllForItem(id);
+  await deleteEntriesForItem(id);
   await (await getDb()).delete("items", id);
   changed();
 }

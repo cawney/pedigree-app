@@ -4,5 +4,5 @@ import { ViewerScreen } from "./viewer/ViewerScreen";
 
 export function App() {
   const route = useRoute();
-  return route.name === "read" ? <ViewerScreen key={route.id} id={route.id} /> : <LibraryScreen />;
+  return route.name === "read" ? <ViewerScreen key={route.id} id={route.id} startPage={route.page} /> : <LibraryScreen />;
 }

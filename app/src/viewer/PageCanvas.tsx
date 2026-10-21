@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { capScale, fitSize, type Size } from "./geometry";
 
@@ -9,12 +9,14 @@ interface Props {
   bounds: Size;
   /** Extra resolution for zoomed-in viewing. */
   renderZoom?: number;
+  /** Drawn over the page (markup). Gets the page size in page units and CSS pixels per unit. */
+  overlay?: (pageSize: Size, cssScale: number) => ReactNode;
 }
 
 /** One PDF page drawn to fit `bounds`, sharp on high-density screens. */
-export function PageCanvas({ doc, pageNum, bounds, renderZoom = 1 }: Props) {
+export function PageCanvas({ doc, pageNum, bounds, renderZoom = 1, overlay }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [fit, setFit] = useState<Size>();
+  const [fit, setFit] = useState<Size & { page: Size }>();
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
@@ -28,7 +30,7 @@ export function PageCanvas({ doc, pageNum, bounds, renderZoom = 1 }: Props) {
       const base = page.getViewport({ scale: 1 });
       const pageSize = { w: base.width, h: base.height };
       const fitted = fitSize(pageSize, bounds);
-      setFit({ w: fitted.w, h: fitted.h });
+      setFit({ w: fitted.w, h: fitted.h, page: pageSize });
 
       const scale = capScale(pageSize, fitted.scale * (window.devicePixelRatio || 1) * renderZoom);
       const viewport = page.getViewport({ scale });
@@ -62,6 +64,7 @@ export function PageCanvas({ doc, pageNum, bounds, renderZoom = 1 }: Props) {
   return (
     <div className="page-sheet" style={fit ? { width: fit.w, height: fit.h } : undefined}>
       <canvas ref={canvasRef} className="page-canvas" />
+      {fit && overlay?.(fit.page, fit.w / fit.page.w)}
       {failed && <span className="page-error">This page couldn’t be displayed.</span>}
     </div>
   );

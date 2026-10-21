@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { clampView, fitSize, IDENTITY, MAX_ZOOM, MIN_ZOOM, zoomAround, type Size, type View } from "./geometry";
 import { useDebouncedValue, useElementSize } from "./hooks";
+import type { DrawInput, PagePointer } from "../markup/drawing";
 import { PageCanvas } from "./PageCanvas";
 
 interface Props {
@@ -11,6 +12,10 @@ interface Props {
   onPage: (page: number) => void;
   /** A single tap in the middle of the page (shows/hides the toolbars). */
   onTapCenter: () => void;
+  /** Markup input. Pointers it wants draw instead of turning pages. */
+  draw?: DrawInput;
+  /** Drawn over each page (markup). */
+  renderOverlay?: (pageNum: number, pageSize: Size, cssScale: number) => ReactNode;
   ref?: React.Ref<StageHandle>;
 }
 
@@ -21,11 +26,24 @@ export interface StageHandle {
 type Point = { x: number; y: number };
 type Gesture =
   | { kind: "swipe" | "pan"; start: Point; startView: View; moved: boolean; t0: number }
-  | { kind: "pinch"; startDist: number; startMid: Point; startView: View };
+  | { kind: "pinch"; startDist: number; startMid: Point; startView: View }
+  | { kind: "draw"; pointerId: number; pointerType: string; t0: number; last: Point };
+
+/** A finger stroke this young becomes a pinch if a second finger lands. */
+const DRAW_TO_PINCH_MS = 250;
 
 const SLIDE_MS = 220;
 const DOUBLE_TAP_MS = 280;
 const TAP_ZOOM = 2.5;
+
+/** Keep receiving a pointer's events even if it leaves the stage. Throws if the pointer is already gone, which is harmless. */
+const capture = (e: React.PointerEvent) => {
+  try {
+    e.currentTarget.setPointerCapture(e.pointerId);
+  } catch {
+    // ignore
+  }
+};
 
 const dist = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 const mid = (a: Point, b: Point) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
@@ -40,7 +58,7 @@ const isZoomed = (v: View) => v.zoom > 1.01;
  * the toolbars. Mouse/trackpad: click edges, ctrl+scroll or pinch to zoom,
  * scroll to turn pages or pan when zoomed.
  */
-export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Props) {
+export function PageStage({ doc, page, pageCount, onPage, onTapCenter, draw, renderOverlay, ref }: Props) {
   const stageRef = useRef<HTMLDivElement>(null);
   const stage = useElementSize(stageRef);
   const [box, setBox] = useState<Size>({ w: 0, h: 0 });
@@ -55,11 +73,14 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
   const animating = useRef(false);
   const lastTap = useRef<{ t: number; p: Point } | null>(null);
   const tapTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const currentBox = useRef<HTMLDivElement>(null);
+  /** Current page size in page units, for turning screen positions into page positions. */
+  const pageSize = useRef<Size>({ w: 1, h: 1 });
 
   // Handlers read the latest values through this ref, so they don't need to
   // be recreated (and re-attached) on every render.
-  const latest = useRef({ view, box, stage, page, pageCount, onPage, onTapCenter });
-  latest.current = { view, box, stage, page, pageCount, onPage, onTapCenter };
+  const latest = useRef({ view, box, stage, page, pageCount, onPage, onTapCenter, draw });
+  latest.current = { view, box, stage, page, pageCount, onPage, onTapCenter, draw };
 
   // Size of the current page when fitted to the screen.
   useEffect(() => {
@@ -68,6 +89,7 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
     void doc.getPage(page).then((p) => {
       if (cancelled) return;
       const vp = p.getViewport({ scale: 1 });
+      pageSize.current = { w: vp.width, h: vp.height };
       const f = fitSize({ w: vp.width, h: vp.height }, stage);
       setBox({ w: f.w, h: f.h });
     });
@@ -125,7 +147,7 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
     };
   };
 
-  const handleTap = (p: Point) => {
+  const handleTap = (p: Point, client: { clientX: number; clientY: number }) => {
     const now = performance.now();
     const prev = lastTap.current;
     if (prev && now - prev.t < DOUBLE_TAP_MS && dist(prev.p, p) < 40) {
@@ -138,7 +160,8 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
     lastTap.current = { t: now, p };
     tapTimer.current = setTimeout(() => {
       lastTap.current = null;
-      const { view, stage, onTapCenter } = latest.current;
+      const { view, stage, page, onTapCenter, draw } = latest.current;
+      if (draw?.tap(client.clientX, client.clientY, page)) return; // tapped a note
       if (isZoomed(view)) onTapCenter();
       else if (p.x < stage.w * 0.18) go(-1);
       else if (p.x > stage.w * 0.82) go(1);
@@ -146,9 +169,53 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
     }, DOUBLE_TAP_MS);
   };
 
+  /** Screen position → position on the current page, in page units. */
+  const toPagePointer = (e: { clientX: number; clientY: number; pressure: number; pointerType: string }): PagePointer => {
+    const r = currentBox.current!.getBoundingClientRect();
+    const size = pageSize.current;
+    const pressure = e.pointerType === "pen" ? e.pressure || 0.5 : 0.5;
+    return {
+      page: latest.current.page,
+      point: [((e.clientX - r.left) / r.width) * size.w, ((e.clientY - r.top) / r.height) * size.h, pressure],
+      clientX: e.clientX,
+      clientY: e.clientY,
+    };
+  };
+
+  const beginDraw = (e: React.PointerEvent) => {
+    gesture.current = { kind: "draw", pointerId: e.pointerId, pointerType: e.pointerType, t0: performance.now(), last: local(e) };
+    latest.current.draw!.begin(toPagePointer(e), e.pointerType);
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     if (animating.current || (e.pointerType === "mouse" && e.button !== 0)) return;
-    e.currentTarget.setPointerCapture(e.pointerId);
+    const g = gesture.current;
+    const draw = latest.current.draw;
+
+    if (g?.kind === "draw") {
+      // A second finger right after a finger stroke started means pinch, not draw.
+      const young = performance.now() - g.t0 < DRAW_TO_PINCH_MS;
+      if (g.pointerType !== "touch" || e.pointerType !== "touch" || !young) return; // e.g. palm under the pencil
+      draw?.cancel();
+      gesture.current = null;
+      pointers.current.clear();
+      // Treat the drawing finger as the first finger of the pinch.
+      capture(e);
+      pointers.current.set(g.pointerId, g.last);
+    }
+
+    if (draw?.wants(e.pointerType) && (e.pointerType === "pen" || pointers.current.size === 0)) {
+      // The pencil wins over any touch already down (a resting palm).
+      if (pointers.current.size) {
+        pointers.current.clear();
+        springBack();
+      }
+      capture(e);
+      beginDraw(e);
+      return;
+    }
+
+    capture(e);
     pointers.current.set(e.pointerId, local(e));
     const pts = [...pointers.current.values()];
     if (pts.length === 2) {
@@ -160,10 +227,18 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
+    const g = gesture.current;
+    if (g?.kind === "draw") {
+      if (e.pointerId !== g.pointerId) return;
+      g.last = local(e);
+      // Coalesced events give the full-rate Apple Pencil samples between frames.
+      const events = e.nativeEvent.getCoalescedEvents?.() ?? [];
+      latest.current.draw?.move((events.length ? events : [e.nativeEvent]).map(toPagePointer));
+      return;
+    }
     if (!pointers.current.has(e.pointerId)) return;
     const p = local(e);
     pointers.current.set(e.pointerId, p);
-    const g = gesture.current;
     if (!g) return;
     const { box, stage, page, pageCount } = latest.current;
 
@@ -188,9 +263,17 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
+    const g = gesture.current;
+    if (g?.kind === "draw") {
+      if (e.pointerId !== g.pointerId) return;
+      gesture.current = null;
+      if (e.type === "pointercancel") latest.current.draw?.cancel();
+      else latest.current.draw?.end();
+      return;
+    }
+
     const p = pointers.current.get(e.pointerId);
     pointers.current.delete(e.pointerId);
-    const g = gesture.current;
     if (!g || !p) return;
 
     if (g.kind === "pinch") {
@@ -204,7 +287,7 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
 
     if (g.kind === "swipe" && e.type === "pointercancel") return springBack();
     if (!g.moved) {
-      if (performance.now() - g.t0 < 350) handleTap(p);
+      if (performance.now() - g.t0 < 350) handleTap(p, e);
       return;
     }
     if (g.kind === "swipe") {
@@ -272,6 +355,7 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
               {n >= 1 && n <= pageCount && (
                 <div
                   className="page-box"
+                  ref={n === page ? currentBox : undefined}
                   style={
                     n === page
                       ? {
@@ -281,7 +365,13 @@ export function PageStage({ doc, page, pageCount, onPage, onTapCenter, ref }: Pr
                       : undefined
                   }
                 >
-                  <PageCanvas doc={doc} pageNum={n} bounds={stage} renderZoom={n === page ? renderZoom : 1} />
+                  <PageCanvas
+                    doc={doc}
+                    pageNum={n}
+                    bounds={stage}
+                    renderZoom={n === page ? renderZoom : 1}
+                    overlay={renderOverlay && ((size, cssScale) => renderOverlay(n, size, cssScale))}
+                  />
                 </div>
               )}
             </div>

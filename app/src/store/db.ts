@@ -1,4 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+import type { PageMarkup } from "../markup/types";
+import type { HipEntry } from "../shortlist/types";
 
 /** A catalog in the user's library on this device. */
 export interface LibraryItem {
@@ -21,15 +23,27 @@ interface PedigreeDB extends DBSchema {
   items: { key: string; value: LibraryItem };
   /** PDF files, used when running in a browser (native apps use the filesystem). */
   files: { key: string; value: Blob };
+  /** Markup per catalog page. */
+  markup: { key: string; value: PageMarkup; indexes: { byItem: string } };
+  /** Short list entries, one per catalog page. */
+  hips: { key: string; value: HipEntry; indexes: { byItem: string } };
 }
 
 let dbPromise: Promise<IDBPDatabase<PedigreeDB>> | undefined;
 
 export function getDb(): Promise<IDBPDatabase<PedigreeDB>> {
-  dbPromise ??= openDB<PedigreeDB>("pedigree", 1, {
-    upgrade(db) {
-      db.createObjectStore("items", { keyPath: "id" });
-      db.createObjectStore("files");
+  dbPromise ??= openDB<PedigreeDB>("pedigree", 3, {
+    upgrade(db, oldVersion) {
+      if (oldVersion < 1) {
+        db.createObjectStore("items", { keyPath: "id" });
+        db.createObjectStore("files");
+      }
+      if (oldVersion < 2) {
+        db.createObjectStore("markup", { keyPath: "key" }).createIndex("byItem", "itemId");
+      }
+      if (oldVersion < 3) {
+        db.createObjectStore("hips", { keyPath: "key" }).createIndex("byItem", "itemId");
+      }
     },
   });
   return dbPromise;

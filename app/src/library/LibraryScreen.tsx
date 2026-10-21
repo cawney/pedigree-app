@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { listAvailable, type ServerCatalog } from "../api";
 import { catalogSubtitle, formatBytes, percent } from "../format";
+import { readPref, writePref } from "../prefs";
 import { openCatalog } from "../router";
+import { useEntries } from "../shortlist/store";
+import { ShortlistScreen } from "../shortlist/ShortlistScreen";
 import { listItems, removeItem, subscribe, type LibraryItem } from "../store/library";
 import { AddCatalogSheet } from "./AddCatalogSheet";
 import { addFromServer } from "./addCatalog";
 
-type Tab = "mine" | "available";
+type Tab = "mine" | "shortlist" | "available";
+
+const TAB_KEY = "pedigree.libraryTab";
 
 export function useLibraryItems(): LibraryItem[] | undefined {
   const [items, setItems] = useState<LibraryItem[]>();
@@ -20,7 +25,12 @@ export function useLibraryItems(): LibraryItem[] | undefined {
 
 export function LibraryScreen() {
   const items = useLibraryItems();
-  const [tab, setTab] = useState<Tab>("mine");
+  // Remembered, so coming back from a catalog returns to the same tab.
+  const [tab, setTabState] = useState<Tab>(() => readPref(TAB_KEY, "mine"));
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    writePref(TAB_KEY, t);
+  };
   const [adding, setAdding] = useState(false);
 
   return (
@@ -30,6 +40,9 @@ export function LibraryScreen() {
         <div className="segmented" role="tablist">
           <button role="tab" aria-selected={tab === "mine"} onClick={() => setTab("mine")}>
             My Catalogs
+          </button>
+          <button role="tab" aria-selected={tab === "shortlist"} onClick={() => setTab("shortlist")}>
+            Short List
           </button>
           <button role="tab" aria-selected={tab === "available"} onClick={() => setTab("available")}>
             Available
@@ -43,6 +56,8 @@ export function LibraryScreen() {
       <main className="library-body">
         {tab === "mine" ? (
           <MyCatalogs items={items} onAdd={() => setAdding(true)} />
+        ) : tab === "shortlist" ? (
+          items && <ShortlistScreen items={items} />
         ) : (
           <AvailableCatalogs items={items ?? []} />
         )}
@@ -55,6 +70,12 @@ export function LibraryScreen() {
 
 function MyCatalogs({ items, onAdd }: { items: LibraryItem[] | undefined; onAdd: () => void }) {
   const [query, setQuery] = useState("");
+  const entries = useEntries();
+  const listCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    entries?.forEach((e) => counts.set(e.itemId, (counts.get(e.itemId) ?? 0) + 1));
+    return counts;
+  }, [entries]);
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!items || !q) return items;
@@ -91,6 +112,7 @@ function MyCatalogs({ items, onAdd }: { items: LibraryItem[] | undefined; onAdd:
               <span className="card-sub">{catalogSubtitle(item)}</span>
               <span className="card-meta">
                 {item.lastPage && item.lastPage > 1 ? `Continue at page ${item.lastPage}` : formatBytes(item.sizeBytes)}
+                {listCounts.get(item.id) ? <span className="card-count"> · ★ {listCounts.get(item.id)} on short list</span> : null}
               </span>
             </button>
             <button
